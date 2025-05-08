@@ -113,30 +113,33 @@ class BIAssistant:
 
     def initialize_system(self):
         try:
+            # Step 1: Generate Summary from Business Data
             stats = self._generate_statistical_summaries()
+
+            # Step 2: Split into Documents
             splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separator="\n")
             docs = splitter.create_documents([stats])
 
+            # Step 3: Generate Embeddings using HuggingFace
             embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
                 model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
             )
             self.vectorstore = FAISS.from_documents(docs, embeddings)
 
-            model_name = "distilgpt2"
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForCausalLM.from_pretrained(model_name)
-
-            pipe = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                max_new_tokens=100,
-                device=0 if torch.cuda.is_available() else -1,
-                pad_token_id=tokenizer.eos_token_id
+            # Step 4: Load DeepSeek via OpenAI SDK
+            from langchain.chat_models import ChatOpenAI
+            llm = ChatOpenAI(
+                openai_api_key="apikey",  # Replace with actual key or keep from env
+                openai_api_base="https://integrate.api.nvidia.com/v1",
+                model_name="deepseek-ai/deepseek-r1",
+                temperature=0.6,
+                max_tokens=4096,
+                streaming=True
             )
 
-            llm = HuggingFacePipeline(pipeline=pipe)
+            # Step 5: Define Prompt Template
+            from langchain_core.prompts import ChatPromptTemplate
 
             prompt_template = """Answer concisely using ONLY this business data:
             {context}
@@ -144,14 +147,17 @@ class BIAssistant:
             Question: {question}
 
             Answer in this format:
-            [Summary] 1-2 sentence overview
-            [Top Products] List top 3 if available
-            [Key Metric] Most relevant number
-            [Recommendation] One actionable suggestion
+            [Summary] 1-2 sentence overview  
+            [Top Products] List top 3 if available  
+            [Key Metric] Most relevant number  
+            [Recommendation] One actionable suggestion  
 
             Answer:"""
 
             PROMPT = ChatPromptTemplate.from_template(prompt_template)
+
+            # Step 6: Set up QA Chain
+            from langchain.chains import RetrievalQA
 
             self.qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
@@ -160,7 +166,7 @@ class BIAssistant:
                 chain_type_kwargs={"prompt": PROMPT, "document_variable_name": "context"}
             )
 
-            return "System initialized successfully!"
+            return "System initialized successfully with DeepSeek!"
         except Exception as e:
             return f"Initialization failed: {str(e)}"
 
