@@ -13,6 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from langchain_community.llms import HuggingFacePipeline
 from sklearn.linear_model import LinearRegression
 import torch
+from openai import OpenAI
 
 import os
 os.environ["STREAMLIT_DISABLE_WATCHDOG_WARNING"] = "true"
@@ -23,6 +24,10 @@ class BIAssistant:
         self.data = None
         self.vectorstore = None
         self.qa_chain = None
+        self.client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=  ""# Replace with a secure variable in production
+        )
         self.column_map = {
             'date': None,
             'product': None,
@@ -113,71 +118,62 @@ class BIAssistant:
 
     def initialize_system(self):
         try:
-            # Step 1: Generate Summary from Business Data
-            stats = self._generate_statistical_summaries()
-
-            # Step 2: Split into Documents
-            splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separator="\n")
-            docs = splitter.create_documents([stats])
-
-            # Step 3: Generate Embeddings using HuggingFace
-            embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
-            )
-            self.vectorstore = FAISS.from_documents(docs, embeddings)
-
-            # Step 4: Load DeepSeek via OpenAI SDK
-            from langchain.chat_models import ChatOpenAI
-            llm = ChatOpenAI(
-                openai_api_key="apikey",  # Replace with actual key or keep from env
-                openai_api_base="https://integrate.api.nvidia.com/v1",
-                model_name="deepseek-ai/deepseek-r1",
-                temperature=0.6,
-                max_tokens=4096,
-                streaming=True
-            )
-
-            # Step 5: Define Prompt Template
-            from langchain_core.prompts import ChatPromptTemplate
-
-            prompt_template = """Answer concisely using ONLY this business data:
-            {context}
-
-            Question: {question}
-
-            Answer in this format:
-            [Summary] 1-2 sentence overview  
-            [Top Products] List top 3 if available  
-            [Key Metric] Most relevant number  
-            [Recommendation] One actionable suggestion  
-
-            Answer:"""
-
-            PROMPT = ChatPromptTemplate.from_template(prompt_template)
-
-            # Step 6: Set up QA Chain
-            from langchain.chains import RetrievalQA
-
-            self.qa_chain = RetrievalQA.from_chain_type(
-                llm=llm,
-                chain_type="stuff",
-                retriever=self.vectorstore.as_retriever(search_kwargs={"k": 3}),
-                chain_type_kwargs={"prompt": PROMPT, "document_variable_name": "context"}
-            )
-
-            return "System initialized successfully with DeepSeek!"
+            self.stats_summary = self._generate_statistical_summaries()
+            return "System initialized successfully!"
         except Exception as e:
             return f"Initialization failed: {str(e)}"
 
+    def _generate_statistical_summaries(self):
+        summary = "Business Data Summary:\n"
+        product_col = self.column_map['product']
+        sales_col = self.column_map['sales']
+        date_col = self.column_map['date']
+
+        if product_col and sales_col:
+            try:
+                top_products = self.data.groupby(product_col)[sales_col].sum().nlargest(5)
+                summary += f"\nTop 5 Products by Sales:\n{top_products.to_string()}\n"
+            except:
+                summary += "\nProduct analysis unavailable\n"
+
+        if date_col and sales_col:
+            try:
+                monthly_sales = self.data.groupby(pd.Grouper(key=date_col, freq='ME'))[sales_col].sum()
+                summary += f"\nLast 3 Months Sales:\n{monthly_sales.tail(3).to_string()}\n"
+            except:
+                summary += "\nSales trend analysis unavailable\n"
+
+        return summary
+
     def ask_question(self, question):
         try:
-            if not self.qa_chain:
-                return "System not initialized."
-            result = self.qa_chain.invoke({"query": question})
-            return result["result"]
+            if not self.stats_summary:
+                return "System not initialized. Please load data and initialize first."
+
+            system_message = (
+                "You are a business intelligence assistant. Use the provided business data "
+                "to answer user queries with clear insights.\n\n"
+                + self.stats_summary
+            )
+
+            completion = self.client.chat.completions.create(
+                model="nvidia/llama-3.3-nemotron-super-49b-v1",
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": question}
+                ],
+                temperature=0.6,
+                top_p=0.95,
+                max_tokens=4096,
+                frequency_penalty=0,
+                presence_penalty=0,
+                stream=False
+            )
+
+            return completion.choices[0].message.content.strip().replace('*', '')
+
         except Exception as e:
-            return f"Error: {str(e)}"
+            return f"Error answering question: {str(e)}"
 
     def generate_plot(self, plot_type):
         try:
